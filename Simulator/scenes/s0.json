@@ -1,0 +1,29 @@
+{
+  "name": "S1 Basic Static Scene",
+
+  "map": {
+    "width": 1000,
+    "height": 700,
+    "margin": 40
+  },
+
+  "start_pose": {
+    "x": 100.0,
+    "y": 100.0,
+    "theta": 0.0
+  },
+
+  "goal": {
+    "x": 850.0,
+    "y": 550.0,
+    "radius": 30.0
+  },
+
+  "static_obstacles": [
+    { "x": 250, "y": 120, "w": 120, "h": 200 },
+    { "x": 500, "y": 350, "w": 180, "h": 100 },
+    { "x": 760, "y": 120, "w": 80, "h": 220 }
+  ],
+
+  "dynamic_obstacles": []
+}
