@@ -1,4 +1,4 @@
-# Part B Usage (Controllers M0-M3)
+# Controller Usage (M0-M3)
 
 This repo implements Part B controllers with a unified interface:
 
