@@ -10,9 +10,19 @@ class SafetyFilterController(BaseController):
 
     controller_id = "M2"
 
-    def __init__(self, limits):
+    def __init__(
+        self,
+        limits,
+        safety_distance: float = 75.0,
+        stop_distance: float = 35.0,
+    ):
         super().__init__(limits)
-        self.shared = SharedController(max_v=limits.max_v, max_omega=limits.max_omega)
+        self.shared = SharedController(
+            max_v=limits.max_v,
+            max_omega=limits.max_omega,
+            safety_distance=safety_distance,
+            stop_distance=stop_distance,
+        )
 
     def get_action(self, obs: dict, user_cmd: tuple[float, float]) -> dict:
         u_h = (float(user_cmd[0]), float(user_cmd[1]))
@@ -39,4 +49,3 @@ class SafetyFilterController(BaseController):
             "risk_terms": risk_terms,
             "dominant_risk": "d_min",
         }
-

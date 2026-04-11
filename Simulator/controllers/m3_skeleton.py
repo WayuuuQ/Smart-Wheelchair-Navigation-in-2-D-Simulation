@@ -16,9 +16,19 @@ class M3SkeletonController(BaseController):
 
     controller_id = "M3"
 
-    def __init__(self, limits):
+    def __init__(
+        self,
+        limits,
+        safety_distance: float = 75.0,
+        stop_distance: float = 35.0,
+    ):
         super().__init__(limits)
-        self.shared = SharedController(max_v=limits.max_v, max_omega=limits.max_omega)
+        self.shared = SharedController(
+            max_v=limits.max_v,
+            max_omega=limits.max_omega,
+            safety_distance=safety_distance,
+            stop_distance=stop_distance,
+        )
         self.planner = SimpleLocalPlanner(self.shared)
 
     def get_action(self, obs: dict, user_cmd: tuple[float, float]) -> dict:
@@ -39,4 +49,3 @@ class M3SkeletonController(BaseController):
             "dominant_risk": None,
             "implemented": False,
         }
-

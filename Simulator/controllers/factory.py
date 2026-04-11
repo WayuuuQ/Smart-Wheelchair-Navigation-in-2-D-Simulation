@@ -31,17 +31,32 @@ def make_controller(controller_id: str, *, max_v: float, max_omega: float, **kwa
     cid = normalize_controller_id(controller_id)
     limits = ControllerLimits(max_v=float(max_v), max_omega=float(max_omega))
 
+    safety_distance = float(kwargs.get("safety_distance", 75.0))
+    stop_distance = float(kwargs.get("stop_distance", 35.0))
+
     if cid == "M0":
         return ManualController(limits)
     if cid == "M1":
         a0 = float(kwargs.get("a0", 0.6))
-        return FixedBlendingController(limits, a0=a0)
+        return FixedBlendingController(
+            limits,
+            a0=a0,
+            safety_distance=safety_distance,
+            stop_distance=stop_distance,
+        )
     if cid == "M2":
-        return SafetyFilterController(limits)
+        return SafetyFilterController(
+            limits,
+            safety_distance=safety_distance,
+            stop_distance=stop_distance,
+        )
     if cid == "M3":
-        return M3SkeletonController(limits)
+        return M3SkeletonController(
+            limits,
+            safety_distance=safety_distance,
+            stop_distance=stop_distance,
+        )
 
     raise ValueError(
         f"Unknown controller '{controller_id}'. Supported: {', '.join(SUPPORTED_CONTROLLERS)}"
     )
-

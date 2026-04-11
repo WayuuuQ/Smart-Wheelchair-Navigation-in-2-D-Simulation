@@ -6,13 +6,6 @@ import math
 from pathlib import Path
 
 import numpy as np
-import pygame
-
-from environment import Environment, load_scene
-from input_handler import KeyboardTeleop
-from renderer import Renderer
-from sensor import LidarSensor
-from wheelchair import Wheelchair
 from controllers import SUPPORTED_CONTROLLERS, make_controller
 
 
@@ -21,13 +14,18 @@ NEAR_COLLISION_DISTANCE = 40.0
 INTERVENTION_V_THRESHOLD = 1.0
 INTERVENTION_OMEGA_THRESHOLD = 0.1
 OSCILLATION_OMEGA_THRESHOLD = 1.0
-CONTROLLER_KEY_MAP = {
-    pygame.K_1: "M0",
-    pygame.K_2: "M1",
-    pygame.K_3: "M2",
-    pygame.K_4: "M3",
-}
 DEFAULT_BATCH_SCENES = ("scenes/s0.json", "scenes/s1.json", "scenes/s2.json", "scenes/s3.json", "scenes/s4.json")
+
+
+def _import_pygame():
+    """Import pygame lazily so `--help` works without pygame installed."""
+    try:
+        import pygame  # type: ignore
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Missing dependency: pygame. Install it (see environment.yml) to run the simulator."
+        ) from exc
+    return pygame
 
 
 class BatchPathUser:
@@ -483,6 +481,35 @@ def parse_args():
         default="M0",
         help="Controller choice: M0 (manual), M1 (fixed blending), M2 (safety filter), M3 (skeleton)",
     )
+    parser.add_argument(
+        "--a0",
+        type=float,
+        default=0.6,
+        help="M1 fixed blending weight: u = a0*u_h + (1-a0)*u_a (default: 0.6)",
+    )
+    parser.add_argument(
+        "--safety-distance",
+        type=float,
+        default=75.0,
+        help="Safety filter / planner distance threshold (default: 75.0)",
+    )
+    parser.add_argument(
+        "--stop-distance",
+        type=float,
+        default=35.0,
+        help="Safety filter hard stop distance threshold (default: 35.0)",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable periodic status prints during simulation (default: off).",
+    )
+    parser.add_argument(
+        "--log-every",
+        type=int,
+        default=30,
+        help="When --verbose is set, print one status line every N steps (default: 30).",
+    )
     # Backward-compatible alias (deprecated).
     parser.add_argument(
         "--mode",
@@ -686,6 +713,12 @@ def build_group_stats(results):
 
 
 def build_simulation(scene_data):
+    # Imports live here so `python Simulator/main.py --help` works even if pygame isn't installed.
+    from environment import Environment
+    from input_handler import KeyboardTeleop
+    from sensor import LidarSensor
+    from wheelchair import Wheelchair
+
     env = Environment(scene_data)
     sx, sy, stheta = env.get_start_pose()
     robot_radius = scene_data.get("robot", {}).get("radius", 20.0)
@@ -712,7 +745,11 @@ def build_obs(pose, goal, lidar_data, control_context=None):
     }
 
 
-def run_episode(scene_path, controller_id, render=True, interactive=True):
+def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False, log_every=30, render=True, interactive=True):
+    from environment import load_scene
+
+    pygame = _import_pygame()
+
     scene_data = load_scene(scene_path)
     env, wheelchair, teleop, lidar, max_episode_time = build_simulation(
         scene_data
@@ -721,11 +758,23 @@ def run_episode(scene_path, controller_id, render=True, interactive=True):
     screen = None
     clock = pygame.time.Clock()
     current_controller_id = controller_id
+    controller_kwargs = {} if controller_kwargs is None else dict(controller_kwargs)
     controller = make_controller(
-        current_controller_id, max_v=wheelchair.max_v, max_omega=wheelchair.max_omega
+        current_controller_id,
+        max_v=wheelchair.max_v,
+        max_omega=wheelchair.max_omega,
+        **controller_kwargs,
     )
+    controller_key_map = {
+        pygame.K_1: "M0",
+        pygame.K_2: "M1",
+        pygame.K_3: "M2",
+        pygame.K_4: "M3",
+    }
 
     if render:
+        from renderer import Renderer
+
         screen = pygame.display.set_mode((scene_data["map"]["width"], scene_data["map"]["height"]))
         pygame.display.set_caption(scene_data.get("name", "Smart Wheelchair Simulator"))
         renderer = Renderer(screen)
@@ -772,12 +821,13 @@ def run_episode(scene_path, controller_id, render=True, interactive=True):
                     if renderer is not None and event.key == pygame.K_l:
                         renderer.show_lidar = not renderer.show_lidar
 
-                    if interactive and event.key in CONTROLLER_KEY_MAP:
-                        current_controller_id = CONTROLLER_KEY_MAP[event.key]
+                    if interactive and event.key in controller_key_map:
+                        current_controller_id = controller_key_map[event.key]
                         controller = make_controller(
                             current_controller_id,
                             max_v=wheelchair.max_v,
                             max_omega=wheelchair.max_omega,
+                            **controller_kwargs,
                         )
                         print("Switched controller to: {0}".format(current_controller_id))
 
@@ -800,6 +850,20 @@ def run_episode(scene_path, controller_id, render=True, interactive=True):
         exec_omega = float(action["omega"])
         final_alpha = action.get("alpha", None)
         final_assist_cmd = action.get("u_a", None)
+
+        # Low-frequency console logging for acceptance checks (no spam unless --verbose).
+        if verbose and log_every > 0 and step_count % log_every == 0:
+            d_min = float(np.min(lidar_data["ranges"]))
+            u_a = action.get("u_a", None)
+            alpha = action.get("alpha", None)
+            print(
+                f"[{current_controller_id}] "
+                f"d_min={d_min:.2f} "
+                f"user_cmd={user_cmd} "
+                f"exec=({exec_v:.2f},{exec_omega:.2f}) "
+                f"u_a={u_a} "
+                f"alpha={alpha}"
+            )
         old_x, old_y = pose[0], pose[1]
         d_min = float(np.min(lidar_data["ranges"]))
 
@@ -852,20 +916,7 @@ def run_episode(scene_path, controller_id, render=True, interactive=True):
         episode_metrics["alpha_count"] += 1
         episode_metrics["max_alpha"] = max(episode_metrics["max_alpha"], alpha_value)
 
-        if step_count % 30 == 0:
-            message = (
-                f"[{current_controller_id}] "
-                f"d_min={d_min:.2f}, "
-                f"user_cmd=({user_cmd[0]:.2f}, {user_cmd[1]:.2f}), "
-                f"exec_cmd=({exec_v:.2f}, {exec_omega:.2f})"
-            )
-            if final_assist_cmd is not None:
-                message += (
-                    f", assist_cmd=({final_assist_cmd[0]:.2f}, {final_assist_cmd[1]:.2f}), "
-                    f"alpha={0.0 if final_alpha is None else float(final_alpha):.2f}"
-                )
-            if interactive or not render:
-                print(message)
+        # (Old periodic print removed: replaced by the --verbose/--log-every logger above.)
 
         wheelchair.step(exec_v, exec_omega, dt)
         env.update(dt)
@@ -1019,6 +1070,13 @@ def save_batch_results(results, output_dir):
 
 def run_batch_experiments(args):
     results = []
+    controller_kwargs = {
+        "a0": float(args.a0),
+        "safety_distance": float(args.safety_distance),
+        "stop_distance": float(args.stop_distance),
+    }
+    log_every = int(args.log_every)
+    verbose = bool(args.verbose)
 
     for scene_path in args.batch_scenes:
         for controller_id in args.batch_controllers:
@@ -1031,6 +1089,9 @@ def run_batch_experiments(args):
                 result = run_episode(
                     scene_path=scene_path,
                     controller_id=controller_id,
+                    controller_kwargs=controller_kwargs,
+                    verbose=verbose,
+                    log_every=log_every,
                     render=False,
                     interactive=False,
                 )
@@ -1043,6 +1104,16 @@ def run_batch_experiments(args):
 
 def main():
     args = parse_args()
+
+    pygame = _import_pygame()
+
+    controller_kwargs = {
+        "a0": float(args.a0),
+        "safety_distance": float(args.safety_distance),
+        "stop_distance": float(args.stop_distance),
+    }
+    log_every = int(args.log_every)
+    verbose = bool(args.verbose)
 
     if args.batch:
         pygame.init()
@@ -1058,6 +1129,9 @@ def main():
         run_episode(
             scene_path=args.scene,
             controller_id=args.controller,
+            controller_kwargs=controller_kwargs,
+            verbose=verbose,
+            log_every=log_every,
             render=True,
             interactive=True,
         )
