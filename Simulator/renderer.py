@@ -23,8 +23,8 @@ class Renderer:
         self.lidar_hit_color = (255, 80, 0)
 
         pygame.font.init()
-        self.font = pygame.font.SysFont("arial", 20)
-        self.big_font = pygame.font.SysFont("arial", 28, bold=True)
+        self.font = pygame.font.Font(None, 20)
+        self.big_font = pygame.font.Font(None, 28)
 
     def draw_robot(self, x, y, theta, radius):
         center = (int(x), int(y))

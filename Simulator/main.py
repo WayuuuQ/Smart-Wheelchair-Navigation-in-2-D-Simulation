@@ -8,25 +8,24 @@ from pathlib import Path
 import numpy as np
 import pygame
 
-from controller import SharedController
 from environment import Environment, load_scene
 from input_handler import KeyboardTeleop
 from renderer import Renderer
 from sensor import LidarSensor
 from wheelchair import Wheelchair
+from controllers import SUPPORTED_CONTROLLERS, make_controller
 
 
 FPS = 60
-SUPPORTED_MODES = ("manual", "safety_only", "fixed_alpha", "adaptive_alpha")
 NEAR_COLLISION_DISTANCE = 40.0
 INTERVENTION_V_THRESHOLD = 1.0
 INTERVENTION_OMEGA_THRESHOLD = 0.1
 OSCILLATION_OMEGA_THRESHOLD = 1.0
-MODE_KEY_MAP = {
-    pygame.K_1: "manual",
-    pygame.K_2: "safety_only",
-    pygame.K_3: "fixed_alpha",
-    pygame.K_4: "adaptive_alpha",
+CONTROLLER_KEY_MAP = {
+    pygame.K_1: "M0",
+    pygame.K_2: "M1",
+    pygame.K_3: "M2",
+    pygame.K_4: "M3",
 }
 DEFAULT_BATCH_SCENES = ("scenes/s0.json", "scenes/s1.json", "scenes/s2.json", "scenes/s3.json", "scenes/s4.json")
 
@@ -478,11 +477,19 @@ def parse_args():
         default="scenes/s1.json",
     )
     parser.add_argument(
+        "--controller",
+        type=lambda s: str(s).upper(),
+        choices=SUPPORTED_CONTROLLERS,
+        default="M0",
+        help="Controller choice: M0 (manual), M1 (fixed blending), M2 (safety filter), M3 (skeleton)",
+    )
+    # Backward-compatible alias (deprecated).
+    parser.add_argument(
         "--mode",
         type=str,
-        choices=SUPPORTED_MODES,
-        default="manual",
-        help="Control mode: manual, safety_only, fixed_alpha, adaptive_alpha",
+        choices=("manual", "safety_only", "fixed_alpha", "adaptive_alpha"),
+        default=None,
+        help="(Deprecated) Use --controller. Kept for backward compatibility.",
     )
     parser.add_argument(
         "--batch",
@@ -502,11 +509,12 @@ def parse_args():
         help="Scene list for batch mode",
     )
     parser.add_argument(
-        "--batch-modes",
+        "--batch-controllers",
         nargs="+",
-        choices=SUPPORTED_MODES,
-        default=list(SUPPORTED_MODES),
-        help="Mode list for batch mode",
+        type=lambda s: str(s).upper(),
+        choices=SUPPORTED_CONTROLLERS,
+        default=list(SUPPORTED_CONTROLLERS),
+        help="Controller list for batch mode",
     )
     parser.add_argument(
         "--results-dir",
@@ -514,29 +522,19 @@ def parse_args():
         default="results",
         help="Output directory for batch experiment results",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
 
+    # If user supplied legacy --mode but not --controller, map it.
+    if args.mode is not None and args.controller == "M0":
+        legacy_map = {
+            "manual": "M0",
+            "fixed_alpha": "M1",
+            "safety_only": "M2",
+            "adaptive_alpha": "M3",
+        }
+        args.controller = legacy_map.get(args.mode, args.controller)
 
-def compute_mode_command(mode, controller, pose, goal, user_cmd, lidar_data, control_context=None):
-    if mode == "manual":
-        return user_cmd[0], user_cmd[1], None, None
-
-    if mode == "safety_only":
-        safety_out = controller.apply_safety_filter(user_cmd, lidar_data, control_context)
-        return safety_out["v"], safety_out["omega"], None, None
-
-    assist_out = controller.compute_assist_control(pose, goal, lidar_data, control_context)
-    assist_cmd = (assist_out["v"], assist_out["omega"])
-
-    if mode == "fixed_alpha":
-        alpha = controller.get_fixed_alpha()
-    else:
-        alpha = controller.get_adaptive_alpha(assist_out["front_min"])
-
-    exec_v, exec_omega = controller.blend_commands(
-        user_cmd, assist_cmd, alpha, lidar_data, control_context
-    )
-    return exec_v, exec_omega, assist_cmd, alpha
+    return args
 
 
 def compute_path_length(path_points):
@@ -694,10 +692,6 @@ def build_simulation(scene_data):
 
     wheelchair = Wheelchair(x=sx, y=sy, theta=stheta, radius=robot_radius)
     teleop = KeyboardTeleop()
-    shared_controller = SharedController(
-        max_v=wheelchair.max_v,
-        max_omega=wheelchair.max_omega,
-    )
     lidar = LidarSensor(
         num_beams=31,
         fov_deg=180.0,
@@ -706,18 +700,30 @@ def build_simulation(scene_data):
     )
     max_episode_time = scene_data.get("episode", {}).get("max_time", 60.0)
 
-    return env, wheelchair, teleop, shared_controller, lidar, max_episode_time
+    return env, wheelchair, teleop, lidar, max_episode_time
 
 
-def run_episode(scene_path, mode, render=True, interactive=True):
+def build_obs(pose, goal, lidar_data, control_context=None):
+    return {
+        "pose": pose,
+        "goal": goal,
+        "lidar": lidar_data,
+        "control_context": control_context,
+    }
+
+
+def run_episode(scene_path, controller_id, render=True, interactive=True):
     scene_data = load_scene(scene_path)
-    env, wheelchair, teleop, shared_controller, lidar, max_episode_time = build_simulation(
+    env, wheelchair, teleop, lidar, max_episode_time = build_simulation(
         scene_data
     )
     renderer = None
     screen = None
     clock = pygame.time.Clock()
-    current_mode = mode
+    current_controller_id = controller_id
+    controller = make_controller(
+        current_controller_id, max_v=wheelchair.max_v, max_omega=wheelchair.max_omega
+    )
 
     if render:
         screen = pygame.display.set_mode((scene_data["map"]["width"], scene_data["map"]["height"]))
@@ -731,6 +737,7 @@ def run_episode(scene_path, mode, render=True, interactive=True):
     final_alpha = None
     final_assist_cmd = None
     user_cmd = (0.0, 0.0)
+    exec_v, exec_omega = 0.0, 0.0
     batch_user = None
     control_context = None
     prev_reverse_active = False
@@ -765,9 +772,14 @@ def run_episode(scene_path, mode, render=True, interactive=True):
                     if renderer is not None and event.key == pygame.K_l:
                         renderer.show_lidar = not renderer.show_lidar
 
-                    if interactive and event.key in MODE_KEY_MAP:
-                        current_mode = MODE_KEY_MAP[event.key]
-                        print("Switched control mode to: {0}".format(current_mode))
+                    if interactive and event.key in CONTROLLER_KEY_MAP:
+                        current_controller_id = CONTROLLER_KEY_MAP[event.key]
+                        controller = make_controller(
+                            current_controller_id,
+                            max_v=wheelchair.max_v,
+                            max_omega=wheelchair.max_omega,
+                        )
+                        print("Switched controller to: {0}".format(current_controller_id))
 
         if episode_status != "running":
             break
@@ -782,17 +794,12 @@ def run_episode(scene_path, mode, render=True, interactive=True):
             user_cmd = batch_user.get_command(pose, lidar_data)
             control_context = batch_user.get_control_context()
 
-        exec_v, exec_omega, assist_cmd, alpha = compute_mode_command(
-            mode=current_mode,
-            controller=shared_controller,
-            pose=pose,
-            goal=env.goal,
-            user_cmd=user_cmd,
-            lidar_data=lidar_data,
-            control_context=control_context,
-        )
-        final_alpha = alpha
-        final_assist_cmd = assist_cmd
+        obs = build_obs(pose, env.goal, lidar_data, control_context)
+        action = controller.get_action(obs, user_cmd)
+        exec_v = float(action["v"])
+        exec_omega = float(action["omega"])
+        final_alpha = action.get("alpha", None)
+        final_assist_cmd = action.get("u_a", None)
         old_x, old_y = pose[0], pose[1]
         d_min = float(np.min(lidar_data["ranges"]))
 
@@ -840,22 +847,22 @@ def run_episode(scene_path, mode, render=True, interactive=True):
         ):
             episode_metrics["intervention_steps"] += 1
 
-        alpha_value = 0.0 if alpha is None else float(alpha)
+        alpha_value = 0.0 if final_alpha is None else float(final_alpha)
         episode_metrics["alpha_sum"] += alpha_value
         episode_metrics["alpha_count"] += 1
         episode_metrics["max_alpha"] = max(episode_metrics["max_alpha"], alpha_value)
 
         if step_count % 30 == 0:
             message = (
-                f"[{current_mode}] "
+                f"[{current_controller_id}] "
                 f"d_min={d_min:.2f}, "
                 f"user_cmd=({user_cmd[0]:.2f}, {user_cmd[1]:.2f}), "
                 f"exec_cmd=({exec_v:.2f}, {exec_omega:.2f})"
             )
-            if assist_cmd is not None:
+            if final_assist_cmd is not None:
                 message += (
-                    f", assist_cmd=({assist_cmd[0]:.2f}, {assist_cmd[1]:.2f}), "
-                    f"alpha={alpha:.2f}"
+                    f", assist_cmd=({final_assist_cmd[0]:.2f}, {final_assist_cmd[1]:.2f}), "
+                    f"alpha={0.0 if final_alpha is None else float(final_alpha):.2f}"
                 )
             if interactive or not render:
                 print(message)
@@ -904,7 +911,7 @@ def run_episode(scene_path, mode, render=True, interactive=True):
 
     return {
         "scene": scene_path,
-        "mode": current_mode,
+        "mode": current_controller_id,
         "episode_index": 0,
         "success": episode_status == "success",
         "collision": episode_status == "collision",
@@ -1014,16 +1021,16 @@ def run_batch_experiments(args):
     results = []
 
     for scene_path in args.batch_scenes:
-        for mode in args.batch_modes:
+        for controller_id in args.batch_controllers:
             for episode_index in range(args.episodes):
                 print(
-                    "Batch run: scene={0}, mode={1}, episode={2}".format(
-                        scene_path, mode, episode_index
+                    "Batch run: scene={0}, controller={1}, episode={2}".format(
+                        scene_path, controller_id, episode_index
                     )
                 )
                 result = run_episode(
                     scene_path=scene_path,
-                    mode=mode,
+                    controller_id=controller_id,
                     render=False,
                     interactive=False,
                 )
@@ -1047,10 +1054,10 @@ def main():
 
     pygame.init()
     try:
-        print("Running control mode: {0}".format(args.mode))
+        print("Running controller: {0}".format(args.controller))
         run_episode(
             scene_path=args.scene,
-            mode=args.mode,
+            controller_id=args.controller,
             render=True,
             interactive=True,
         )
