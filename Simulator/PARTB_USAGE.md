@@ -17,7 +17,7 @@ Controllers:
 - `M0`: Manual, `u = u_h`
 - `M1`: Fixed blending, `u = a0*u_h + (1-a0)*u_a`
 - `M2`: Safety filter, `u = SafetyFilter(u_h)`
-- `M3`: Skeleton (placeholder for Part C), currently behaves like manual but reserves fields (`alpha/goal_probs/risk_terms`)
+- `M3`: Adaptive blending, adjusts assist authority from front obstacle risk
 
 During interactive rendering, you can also press keys:
 - `1` -> M0, `2` -> M1, `3` -> M2, `4` -> M3

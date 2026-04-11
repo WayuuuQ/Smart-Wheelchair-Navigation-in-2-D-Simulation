@@ -116,7 +116,7 @@ class Renderer:
 
         min_range = float(lidar_data["ranges"].min()) if lidar_data is not None else 0.0
 
-        self.draw_text("Arrow keys: move   |   R: reset", 10, 10)
+        self.draw_text("Arrows: move | 1-4: controller | L: lidar | R: reset", 10, 10)
         self.draw_text(f"x = {x:.1f}", 10, 40)
         self.draw_text(f"y = {y:.1f}", 10, 65)
         self.draw_text(f"theta = {theta:.2f} rad", 10, 90)

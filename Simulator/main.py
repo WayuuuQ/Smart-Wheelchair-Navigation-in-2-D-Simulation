@@ -15,6 +15,12 @@ INTERVENTION_V_THRESHOLD = 1.0
 INTERVENTION_OMEGA_THRESHOLD = 0.1
 OSCILLATION_OMEGA_THRESHOLD = 1.0
 DEFAULT_BATCH_SCENES = ("scenes/s0.json", "scenes/s1.json", "scenes/s2.json", "scenes/s3.json", "scenes/s4.json")
+CONTROLLER_TO_MODE = {
+    "M0": "manual",
+    "M1": "fixed_alpha",
+    "M2": "safety_only",
+    "M3": "adaptive_alpha",
+}
 
 
 def _import_pygame():
@@ -479,7 +485,7 @@ def parse_args():
         type=lambda s: str(s).upper(),
         choices=SUPPORTED_CONTROLLERS,
         default="M0",
-        help="Controller choice: M0 (manual), M1 (fixed blending), M2 (safety filter), M3 (skeleton)",
+        help="Controller choice: M0 (manual), M1 (fixed blending), M2 (safety filter), M3 (adaptive blending)",
     )
     parser.add_argument(
         "--a0",
@@ -564,6 +570,10 @@ def parse_args():
     return args
 
 
+def controller_id_to_mode(controller_id):
+    return CONTROLLER_TO_MODE.get(str(controller_id).upper(), str(controller_id))
+
+
 def compute_path_length(path_points):
     if len(path_points) < 2:
         return 0.0
@@ -635,11 +645,20 @@ def finalize_episode_metrics(metrics):
 
 def build_group_stats(results):
     grouped_rows = []
-    group_keys = sorted({(row["scene"], row["mode"]) for row in results})
+    group_keys = sorted(
+        {
+            (row["scene"], row["mode"], row.get("controller_id", row["mode"]))
+            for row in results
+        }
+    )
 
-    for scene, mode in group_keys:
+    for scene, mode, controller_id in group_keys:
         group_rows = [
-            row for row in results if row["scene"] == scene and row["mode"] == mode
+            row
+            for row in results
+            if row["scene"] == scene
+            and row["mode"] == mode
+            and row.get("controller_id", row["mode"]) == controller_id
         ]
         num_runs = len(group_rows)
         if num_runs == 0:
@@ -649,6 +668,7 @@ def build_group_stats(results):
             {
                 "scene": scene,
                 "mode": mode,
+                "controller_id": controller_id,
                 "episodes": num_runs,
                 "success_rate": round(
                     sum(1 for row in group_rows if row["success"]) / num_runs, 4
@@ -959,10 +979,12 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
     goal_x, goal_y = env.goal
     goal_distance = math.hypot(final_pose[0] - goal_x, final_pose[1] - goal_y)
     finalized_metrics = finalize_episode_metrics(episode_metrics)
+    mode_name = controller_id_to_mode(current_controller_id)
 
     return {
         "scene": scene_path,
-        "mode": current_controller_id,
+        "mode": mode_name,
+        "controller_id": current_controller_id,
         "episode_index": 0,
         "success": episode_status == "success",
         "collision": episode_status == "collision",
@@ -1001,6 +1023,7 @@ def save_batch_results(results, output_dir):
     fieldnames = [
         "scene",
         "mode",
+        "controller_id",
         "episode_index",
         "success",
         "collision",
@@ -1041,6 +1064,7 @@ def save_batch_results(results, output_dir):
     summary_fieldnames = [
         "scene",
         "mode",
+        "controller_id",
         "episodes",
         "success_rate",
         "collision_rate",
