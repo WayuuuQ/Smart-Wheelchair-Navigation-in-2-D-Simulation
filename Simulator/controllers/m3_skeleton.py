@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from controller import SharedController
+from adaptive_alpha.risk_alpha import AdaptiveAlphaModel
+from explain.fields import build_explain_output
 
 from .base import BaseController
 from .local_planner import SimpleLocalPlanner
@@ -25,6 +27,10 @@ class M3SkeletonController(BaseController):
             stop_distance=stop_distance,
         )
         self.planner = SimpleLocalPlanner(self.shared)
+        self.alpha_model = AdaptiveAlphaModel(
+            safety_distance=safety_distance,
+            stop_distance=stop_distance,
+        )
 
     def get_action(self, obs: dict, user_cmd: tuple[float, float]) -> dict:
         u_h = (float(user_cmd[0]), float(user_cmd[1]))
@@ -33,23 +39,26 @@ class M3SkeletonController(BaseController):
         lidar = obs["lidar"]
         ctx = obs.get("control_context")
         analysis = self.shared._analyze_lidar(lidar)
-        alpha = self.shared.get_adaptive_alpha(analysis["front_min"])
+        alpha, risk_terms, dominant_risk = self.alpha_model.compute(
+            u_h,
+            u_a,
+            analysis,
+            control_context=ctx,
+        )
         v, omega = self.shared.blend_commands(u_h, u_a, alpha, lidar, ctx)
         v, omega = self._clip_action(v, omega)
+        explain_out = build_explain_output(
+            alpha=alpha,
+            risk_terms=risk_terms,
+            dominant_risk=dominant_risk,
+            goal_probs=None,
+        )
 
         return {
             "v": v,
             "omega": omega,
             "u_h": u_h,
             "u_a": u_a,
-            "alpha": float(alpha),
-            "goal_probs": None,
-            "risk_terms": {
-                "d_min": float(analysis["d_min"]),
-                "front_min": float(analysis["front_min"]),
-                "left_min": float(analysis["left_min"]),
-                "right_min": float(analysis["right_min"]),
-            },
-            "dominant_risk": "front_min",
+            **explain_out,
             "implemented": True,
         }

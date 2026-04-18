@@ -3,10 +3,12 @@ import csv
 import heapq
 import json
 import math
+import random
 from pathlib import Path
 
 import numpy as np
 from controllers import SUPPORTED_CONTROLLERS, make_controller
+from user_model.noise import CommandNoiseModel
 
 
 FPS = 60
@@ -53,6 +55,10 @@ class BatchPathUser:
         self.recovery_steps = 0
         self.recovery_turn = 1.0
         self.recovery_active = False
+        self.noise_model = CommandNoiseModel(
+            forward_speed=self.forward_speed,
+            turn_speed=self.turn_speed,
+        )
         self.control_context = {
             "recovery_active": False,
             "corridor_mode": False,
@@ -452,7 +458,32 @@ class BatchPathUser:
             "waypoint_distance": float(distance_to_target),
         }
 
-        return v_cmd, omega_cmd
+        return self._apply_human_model(
+            v_cmd=v_cmd,
+            omega_cmd=omega_cmd,
+            heading_error=heading_error,
+            front_min=front_min,
+            d_min=d_min,
+            preferred_turn_sign=preferred_turn_sign,
+        )
+
+    def _apply_human_model(
+        self,
+        v_cmd,
+        omega_cmd,
+        heading_error,
+        front_min,
+        d_min,
+        preferred_turn_sign,
+    ):
+        return self.noise_model.apply(
+            v_cmd=v_cmd,
+            omega_cmd=omega_cmd,
+            heading_error=heading_error,
+            front_min=front_min,
+            d_min=d_min,
+            preferred_turn_sign=preferred_turn_sign,
+        )
 
     def get_control_context(self):
         return dict(self.control_context)
@@ -555,6 +586,12 @@ def parse_args():
         default="results",
         help="Output directory for batch experiment results",
     )
+    parser.add_argument(
+        "--seed-base",
+        type=int,
+        default=0,
+        help="Base seed for batch experiments",
+    )
     args = parser.parse_args()
 
     # If user supplied legacy --mode but not --controller, map it.
@@ -574,6 +611,16 @@ def controller_id_to_mode(controller_id):
     return CONTROLLER_TO_MODE.get(str(controller_id).upper(), str(controller_id))
 
 
+def build_trial_id(scene_path, controller_id, episode_index):
+    scene_name = Path(scene_path).stem
+    return f"{scene_name}_{str(controller_id).upper()}_{int(episode_index):03d}"
+
+
+def seed_everything(seed):
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+
+
 def compute_path_length(path_points):
     if len(path_points) < 2:
         return 0.0
@@ -589,6 +636,7 @@ def compute_path_length(path_points):
 def build_episode_metrics():
     return {
         "min_obstacle_distance": float("inf"),
+        "min_ttc": float("inf"),
         "obstacle_distance_sum": 0.0,
         "obstacle_samples": 0,
         "near_collision_count": 0,
@@ -615,11 +663,15 @@ def finalize_episode_metrics(metrics):
     min_obstacle_distance = metrics["min_obstacle_distance"]
     if min_obstacle_distance == float("inf"):
         min_obstacle_distance = None
+    min_ttc = metrics["min_ttc"]
+    if min_ttc == float("inf"):
+        min_ttc = None
 
     return {
         "min_obstacle_distance": (
             None if min_obstacle_distance is None else round(min_obstacle_distance, 4)
         ),
+        "min_ttc": None if min_ttc is None else round(min_ttc, 4),
         "avg_obstacle_distance": round(
             metrics["obstacle_distance_sum"] / obstacle_samples, 4
         ),
@@ -688,6 +740,13 @@ def build_group_stats(results):
                 ),
                 "avg_min_obstacle_distance": round(
                     sum(row["min_obstacle_distance"] for row in group_rows) / num_runs,
+                    4,
+                ),
+                "avg_min_ttc": round(
+                    sum(
+                        row["min_ttc"] for row in group_rows if row["min_ttc"] is not None
+                    )
+                    / max(1, sum(1 for row in group_rows if row["min_ttc"] is not None)),
                     4,
                 ),
                 "avg_obstacle_distance": round(
@@ -765,10 +824,23 @@ def build_obs(pose, goal, lidar_data, control_context=None):
     }
 
 
-def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False, log_every=30, render=True, interactive=True):
+def run_episode(
+    scene_path,
+    controller_id,
+    controller_kwargs=None,
+    verbose=False,
+    log_every=30,
+    render=True,
+    interactive=True,
+    episode_index=0,
+    trial_id=None,
+    seed=0,
+    collect_step_logs=False,
+):
     from environment import load_scene
 
     pygame = _import_pygame()
+    seed_everything(seed)
 
     scene_data = load_scene(scene_path)
     env, wheelchair, teleop, lidar, max_episode_time = build_simulation(
@@ -807,11 +879,14 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
     final_assist_cmd = None
     user_cmd = (0.0, 0.0)
     exec_v, exec_omega = 0.0, 0.0
+    step_logs = []
     batch_user = None
     control_context = None
     prev_reverse_active = False
     prev_recovery_active = False
     prev_omega_sign = 0
+    prev_exec_v = None
+    prev_exec_omega = None
     low_progress_steps = 0
     stuck_active = False
     if not interactive:
@@ -870,6 +945,7 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
         exec_omega = float(action["omega"])
         final_alpha = action.get("alpha", None)
         final_assist_cmd = action.get("u_a", None)
+        dominant_risk = action.get("dominant_risk", "")
 
         # Low-frequency console logging for acceptance checks (no spam unless --verbose).
         if verbose and log_every > 0 and step_count % log_every == 0:
@@ -894,6 +970,13 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
         episode_metrics["obstacle_samples"] += 1
         if d_min <= NEAR_COLLISION_DISTANCE:
             episode_metrics["near_collision_count"] += 1
+
+        risk_terms = action.get("risk_terms") or {}
+        front_min_for_ttc = float(risk_terms.get("front_min", d_min))
+        ttc_value = None
+        if exec_v > 1e-6:
+            ttc_value = front_min_for_ttc / max(exec_v, 1e-6)
+            episode_metrics["min_ttc"] = min(episode_metrics["min_ttc"], ttc_value)
 
         reverse_active = exec_v < -1e-6
         if reverse_active and not prev_reverse_active:
@@ -922,6 +1005,8 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
 
         abs_v_diff = abs(exec_v - user_cmd[0])
         abs_omega_diff = abs(exec_omega - user_cmd[1])
+        dv = 0.0 if prev_exec_v is None else exec_v - prev_exec_v
+        domega = 0.0 if prev_exec_omega is None else exec_omega - prev_exec_omega
         episode_metrics["abs_v_diff_sum"] += abs_v_diff
         episode_metrics["abs_omega_diff_sum"] += abs_omega_diff
         episode_metrics["control_steps"] += 1
@@ -935,6 +1020,54 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
         episode_metrics["alpha_sum"] += alpha_value
         episode_metrics["alpha_count"] += 1
         episode_metrics["max_alpha"] = max(episode_metrics["max_alpha"], alpha_value)
+
+        if collect_step_logs:
+            assist_v = 0.0
+            assist_omega = 0.0
+            front_min_value = float(risk_terms.get("front_min", d_min))
+            if final_assist_cmd is not None:
+                assist_v = float(final_assist_cmd[0])
+                assist_omega = float(final_assist_cmd[1])
+
+            step_logs.append(
+                {
+                    "trial_id": trial_id,
+                    "scene": scene_path,
+                    "mode": controller_id_to_mode(current_controller_id),
+                    "controller_id": current_controller_id,
+                    "episode_index": int(episode_index),
+                    "seed": int(seed),
+                    "step_index": int(step_count),
+                    "t": round(elapsed_time, 4),
+                    "pose_x": round(float(pose[0]), 4),
+                    "pose_y": round(float(pose[1]), 4),
+                    "pose_theta": round(float(pose[2]), 4),
+                    "user_v": round(float(user_cmd[0]), 4),
+                    "user_omega": round(float(user_cmd[1]), 4),
+                    "exec_v": round(float(exec_v), 4),
+                    "exec_omega": round(float(exec_omega), 4),
+                    "assist_v": round(float(assist_v), 4),
+                    "assist_omega": round(float(assist_omega), 4),
+                    "alpha": round(float(alpha_value), 4),
+                    "dominant_risk": dominant_risk,
+                    "total_risk": round(float(risk_terms.get("total_risk", 0.0)), 4),
+                    "d_min": round(float(d_min), 4),
+                    "front_min": round(float(front_min_value), 4),
+                    "ttc": "" if ttc_value is None else round(float(ttc_value), 4),
+                    "dv": round(float(dv), 4),
+                    "domega": round(float(domega), 4),
+                    "abs_v_diff": round(float(abs_v_diff), 4),
+                    "abs_omega_diff": round(float(abs_omega_diff), 4),
+                    "workload_l1": round(float(abs_v_diff + abs_omega_diff), 4),
+                    "recovery_active": bool(recovery_active),
+                    "intervened": bool(
+                        abs_v_diff > INTERVENTION_V_THRESHOLD
+                        or abs_omega_diff > INTERVENTION_OMEGA_THRESHOLD
+                    ),
+                }
+            )
+        prev_exec_v = exec_v
+        prev_exec_omega = exec_omega
 
         # (Old periodic print removed: replaced by the --verbose/--log-every logger above.)
 
@@ -982,10 +1115,12 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
     mode_name = controller_id_to_mode(current_controller_id)
 
     return {
+        "trial_id": trial_id,
         "scene": scene_path,
         "mode": mode_name,
         "controller_id": current_controller_id,
-        "episode_index": 0,
+        "episode_index": int(episode_index),
+        "seed": int(seed),
         "success": episode_status == "success",
         "collision": episode_status == "collision",
         "timeout": episode_status == "timeout",
@@ -1004,27 +1139,33 @@ def run_episode(scene_path, controller_id, controller_kwargs=None, verbose=False
             else None
         ),
         "final_alpha": 0.0 if final_alpha is None else round(final_alpha, 4),
+        "_step_logs": step_logs,
     }
 
 
-def save_batch_results(results, output_dir):
+def save_batch_results(results, output_dir, step_logs=None):
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
 
     episode_json_path = output_path / "episode_results.json"
     episode_csv_path = output_path / "episode_results.csv"
+    step_json_path = output_path / "step_results.json"
+    step_csv_path = output_path / "step_results.csv"
     summary_json_path = output_path / "batch_summary.json"
     summary_csv_path = output_path / "batch_summary.csv"
     summary_rows = build_group_stats(results)
+    step_logs = [] if step_logs is None else step_logs
 
     with open(episode_json_path, "w", encoding="utf-8") as json_file:
         json.dump(results, json_file, indent=2)
 
     fieldnames = [
+        "trial_id",
         "scene",
         "mode",
         "controller_id",
         "episode_index",
+        "seed",
         "success",
         "collision",
         "timeout",
@@ -1035,6 +1176,7 @@ def save_batch_results(results, output_dir):
         "path_length",
         "goal_distance",
         "min_obstacle_distance",
+        "min_ttc",
         "avg_obstacle_distance",
         "near_collision_count",
         "reverse_count",
@@ -1058,6 +1200,47 @@ def save_batch_results(results, output_dir):
         for row in results:
             writer.writerow(row)
 
+    with open(step_json_path, "w", encoding="utf-8") as json_file:
+        json.dump(step_logs, json_file, indent=2)
+
+    step_fieldnames = [
+        "trial_id",
+        "scene",
+        "mode",
+        "controller_id",
+        "episode_index",
+        "seed",
+        "step_index",
+        "t",
+        "pose_x",
+        "pose_y",
+        "pose_theta",
+        "user_v",
+        "user_omega",
+        "exec_v",
+        "exec_omega",
+        "assist_v",
+        "assist_omega",
+        "alpha",
+        "dominant_risk",
+        "total_risk",
+        "d_min",
+        "front_min",
+        "ttc",
+        "dv",
+        "domega",
+        "abs_v_diff",
+        "abs_omega_diff",
+        "workload_l1",
+        "recovery_active",
+        "intervened",
+    ]
+    with open(step_csv_path, "w", encoding="utf-8", newline="") as csv_file:
+        writer = csv.DictWriter(csv_file, fieldnames=step_fieldnames)
+        writer.writeheader()
+        for row in step_logs:
+            writer.writerow(row)
+
     with open(summary_json_path, "w", encoding="utf-8") as json_file:
         json.dump(summary_rows, json_file, indent=2)
 
@@ -1072,6 +1255,7 @@ def save_batch_results(results, output_dir):
         "avg_completion_time",
         "avg_path_length",
         "avg_min_obstacle_distance",
+        "avg_min_ttc",
         "avg_obstacle_distance",
         "avg_near_collision_count",
         "avg_reverse_count",
@@ -1094,6 +1278,7 @@ def save_batch_results(results, output_dir):
 
 def run_batch_experiments(args):
     results = []
+    step_logs = []
     controller_kwargs = {
         "a0": float(args.a0),
         "safety_distance": float(args.safety_distance),
@@ -1101,13 +1286,17 @@ def run_batch_experiments(args):
     }
     log_every = int(args.log_every)
     verbose = bool(args.verbose)
+    seed_base = int(getattr(args, "seed_base", 0))
+    run_counter = 0
 
     for scene_path in args.batch_scenes:
         for controller_id in args.batch_controllers:
             for episode_index in range(args.episodes):
+                trial_id = build_trial_id(scene_path, controller_id, episode_index)
+                seed = seed_base + run_counter
                 print(
-                    "Batch run: scene={0}, controller={1}, episode={2}".format(
-                        scene_path, controller_id, episode_index
+                    "Batch run: scene={0}, controller={1}, episode={2}, seed={3}".format(
+                        scene_path, controller_id, episode_index, seed
                     )
                 )
                 result = run_episode(
@@ -1118,11 +1307,16 @@ def run_batch_experiments(args):
                     log_every=log_every,
                     render=False,
                     interactive=False,
+                    episode_index=episode_index,
+                    trial_id=trial_id,
+                    seed=seed,
+                    collect_step_logs=True,
                 )
-                result["episode_index"] = episode_index
+                step_logs.extend(result.pop("_step_logs", []))
                 results.append(result)
+                run_counter += 1
 
-    save_batch_results(results, args.results_dir)
+    save_batch_results(results, args.results_dir, step_logs=step_logs)
     print("Batch results saved to: {0}".format(args.results_dir))
 
 
