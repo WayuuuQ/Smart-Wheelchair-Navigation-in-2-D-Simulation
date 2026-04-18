@@ -1,233 +1,234 @@
 # Smart Wheelchair Navigation in 2D Simulation
 
-This project is a 2D smart wheelchair simulation for testing manual control, safety filtering, and shared control strategies in static indoor scenes.
+This repository contains a 2D smart wheelchair simulator for studying shared control in static indoor scenes.
 
-The simulator supports:
+The current project supports:
 
-- Interactive keyboard control
-- Four control modes
-- Multiple benchmark scenes
+- Interactive keyboard testing
+- Four controller modes (`M0` to `M3`)
 - Batch experiment execution
-- Episode-level and aggregated experiment metrics
+- Episode-level and step-level logging
+- Metric aggregation and plotting
+- Risk-aware adaptive shared control
 
-## Control Modes
+## Project Overview
 
-The project currently supports four modes:
+The simulator lives in the [`Simulator`](./Simulator) directory.
 
-- `manual`
-  - Directly executes user input without intervention
-- `safety_only`
-  - Applies a safety filter to user input
-  - Slows down or stops near obstacles and biases turning toward the more open side
-- `fixed_alpha`
-  - Blends user command and assist command with a fixed weight
-- `adaptive_alpha`
-  - Blends user command and assist command with a risk-dependent adaptive weight
+Main components:
 
-## Project Structure
-
-Main files:
-
-- [main.py](./main.py)
-  - Entry point
-  - Interactive simulation loop
+- [`Simulator/main.py`](./Simulator/main.py)
+  - Main simulation entry
+  - Interactive execution
+  - Episode loop
+  - Batch logging
+- [`Simulator/controllers`](./Simulator/controllers)
+  - Controller implementations (`M0` to `M3`)
+- [`Simulator/controller.py`](./Simulator/controller.py)
+  - Shared control utilities
+  - Safety filtering
+  - Assist controller
+- [`Simulator/user_model`](./Simulator/user_model)
+  - Scripted batch user
+  - Noise / disturbance model
+- [`Simulator/adaptive_alpha`](./Simulator/adaptive_alpha)
+  - Risk computation
+  - Adaptive `alpha(t)` generation
+- [`Simulator/explain`](./Simulator/explain)
+  - Explainability field definitions
+- [`Simulator/runner`](./Simulator/runner)
   - Batch experiment runner
-  - Experiment metric recording and result export
-- [controller.py](./controller.py)
+- [`Simulator/analysis`](./Simulator/analysis)
+  - Metric aggregation
+  - Plot generation
+  - Statistical test placeholder
+- [`Simulator/logs/format.md`](./Simulator/logs/format.md)
+  - Logging schema
+- [`Simulator/scenes`](./Simulator/scenes)
+  - Scene definitions
+
+## Controller Modes
+
+The project currently uses four controller IDs:
+
+- `M0`
+  - Manual control
+  - Executes user command directly
+- `M1`
+  - Fixed blending
+  - Combines user command and assist command with fixed weight
+- `M2`
   - Safety filter
-  - Minimal assist controller
-  - Fixed-alpha and adaptive-alpha blending logic
-- [environment.py](./environment.py)
-  - Scene loading
-  - Obstacle and boundary collision checking
-  - Goal checking
-- [input_handler.py](./input_handler.py)
-  - Keyboard teleoperation input
-- [sensor.py](./sensor.py)
-  - LiDAR simulation
-- [renderer.py](./renderer.py)
-  - Pygame visualization
-- [wheelchair.py](./wheelchair.py)
-  - Wheelchair kinematics
-- [scenes](./scenes)
-  - Benchmark scene definitions
+  - Applies obstacle-aware filtering to user command
+- `M3`
+  - Adaptive shared control
+  - Computes risk terms and adapts `alpha(t)` with a smooth mapping
+
+Legacy mode aliases are still supported:
+
+- `manual` -> `M0`
+- `fixed_alpha` -> `M1`
+- `safety_only` -> `M2`
+- `adaptive_alpha` -> `M3`
+
+## Scenes
+
+Current default scenes are:
+
+- `s0`: basic static obstacle scene
+- `s1`: narrow corridor / bottleneck
+- `s2`: narrow passage
+- `s3`: T-junction
+- `s4`: cluttered obstacle environment
 
 ## Requirements
 
 Recommended environment:
 
 - Python 3.10+
-- `pygame`
 - `numpy`
+- `pygame`
+- `matplotlib` for plotting
 
-Install dependencies:
+If you use Conda, the repository already provides [`environment.yml`](./environment.yml).
 
-```powershell
-pip install pygame numpy
-```
-
-## Run Interactive Simulation
-
-Run a scene in one control mode:
+If you use `pip`, install at least:
 
 ```powershell
-py main.py --scene scenes/s1.json --mode manual
+pip install numpy pygame matplotlib
 ```
 
-Available modes:
+## Interactive Usage
+
+From the repository root:
 
 ```powershell
-manual
-safety_only
-fixed_alpha
-adaptive_alpha
+cd Simulator
+py main.py --scene scenes/s1.json --controller M3
 ```
 
-During simulation:
-
-- `Up / Down / Left / Right`: wheelchair teleoperation
-- `1`: switch to `manual`
-- `2`: switch to `safety_only`
-- `3`: switch to `fixed_alpha`
-- `4`: switch to `adaptive_alpha`
-- `R`: reset scene
-- `L`: toggle LiDAR rendering
-
-## Run Batch Experiments
-
-Run all default scenes and all control modes:
-
-```powershell
-py main.py --batch --results-dir results
-```
-
-Run selected scenes and modes:
-
-```powershell
-py main.py --batch --batch-scenes scenes/s0.json scenes/s1.json --batch-modes manual adaptive_alpha --results-dir results
-```
-
-Run multiple episodes:
-
-```powershell
-py main.py --batch --episodes 3 --results-dir results
-```
-
-## Output Files
-
-After a batch run, the result directory contains:
-
-- `episode_results.json`
-- `episode_results.csv`
-- `batch_summary.json`
-- `batch_summary.csv`
-
-### 1. Episode-Level Results
-
-`episode_results.*` stores one row per episode.
-
-Recorded fields include:
-
-- `scene`
-- `mode`
-- `episode_index`
-- `success`
-- `collision`
-- `timeout`
-- `completion_time`
-- `path_length`
-- `min_obstacle_distance`
-- `avg_obstacle_distance`
-- `near_collision_count`
-- `reverse_count`
-- `reverse_time`
-- `stuck_count`
-- `recovery_count`
-- `oscillation_count`
-- `avg_abs_v_diff`
-- `avg_abs_omega_diff`
-- `intervention_rate`
-- `avg_alpha`
-- `max_alpha`
-
-Notes:
-
-- Path length is accumulated from pose increments.
-- Obstacle distance is derived from LiDAR minimum range.
-- `manual` mode keeps the same output schema, with unavailable control-sharing quantities filled as `0`.
-
-### 2. Aggregated Batch Summary
-
-`batch_summary.*` aggregates results by `(scene, mode)`.
-
-Fields include:
-
-- `episodes`
-- `success_rate`
-- `collision_rate`
-- `timeout_rate`
-- Average values of the numeric episode metrics
-
-## Metric Threshold Constants
-
-The following constants are defined in [main.py](./main.py):
-
-- `NEAR_COLLISION_DISTANCE = 40.0`
-- `INTERVENTION_V_THRESHOLD = 1.0`
-- `INTERVENTION_OMEGA_THRESHOLD = 0.1`
-- `OSCILLATION_OMEGA_THRESHOLD = 1.0`
-
-## Scenes
-
-The default batch runner uses:
-
-- `scenes/s0.json`
-- `scenes/s1.json`
-- `scenes/s2.json`
-- `scenes/s3.json`
-- `scenes/s4.json`
-
-These scenes cover:
-
-- Basic static navigation
-- Narrow corridor navigation
-- Passage and bottleneck behavior
-- T-junction navigation
-- Cluttered environment navigation
-
-## Current Shared Control Design
-
-The current assist logic is intentionally lightweight:
-
-- The assist controller uses pose, goal, and LiDAR
-- The safety controller uses front and lateral obstacle distance
-- Shared modes mainly affect steering while preserving user translational intent as much as possible
-
-This keeps the project simple and suitable for controlled comparisons across modes.
-
-## Recommended Workflow
-
-1. Run interactive tests to verify behavior in a single scene
-2. Run batch experiments across all scenes
-3. Compare `episode_results.csv` for per-episode details
-4. Compare `batch_summary.csv` for scene/mode-level statistics
-
-## Example
-
-Interactive:
+You can also use legacy mode names:
 
 ```powershell
 py main.py --scene scenes/s1.json --mode adaptive_alpha
 ```
 
-Batch:
+Interactive keys:
+
+- `Up / Down / Left / Right`: wheelchair teleoperation
+- `1`: switch to `M0`
+- `2`: switch to `M1`
+- `3`: switch to `M2`
+- `4`: switch to `M3`
+- `R`: reset scene
+- `L`: show / hide LiDAR
+
+## Batch Experiments
+
+Run a small batch example:
 
 ```powershell
-py main.py --batch --results-dir results
+cd Simulator
+py runner\run_batch.py --scenes scenes/s0.json scenes/s1.json --methods M0 M1 M2 M3 --trials 5 --results-dir results
 ```
 
-## Notes
+Run the default full configuration:
 
-- This project currently focuses on static scenes.
-- The batch framework uses an internal scripted path-following user for fair repeated evaluation.
-- Scene `s1` was tuned to remain narrow but passable for all four control modes.
+```powershell
+cd Simulator
+py runner\run_batch.py --scenes scenes/s0.json scenes/s1.json scenes/s2.json scenes/s3.json scenes/s4.json --methods M0 M1 M2 M3 --trials 20 --seed-base 0 --results-dir results
+```
+
+## Output Logs
+
+Batch execution writes:
+
+- `episode_results.csv`
+- `episode_results.json`
+- `step_results.csv`
+- `step_results.json`
+- `batch_summary.csv`
+- `batch_summary.json`
+
+See [`Simulator/logs/format.md`](./Simulator/logs/format.md) for detailed field definitions.
+
+## Metrics and Tables
+
+Generate summary tables from logs:
+
+```powershell
+cd Simulator
+py analysis\build_metrics.py --episode-input results\episode_results.csv --step-input results\step_results.csv --mode-output results\mode_summary.csv --scene-mode-output results\scene_mode_summary.csv
+```
+
+Current main summary tables:
+
+- `mode_summary.csv`
+  - `mode`
+  - `episodes`
+  - `success_rate`
+  - `collision_rate`
+  - `avg_min_ttc`
+  - `avg_workload`
+  - `avg_completion_time`
+- `scene_mode_summary.csv`
+  - `scene`
+  - `mode`
+  - `controller_id`
+  - `episodes`
+  - `success_rate`
+  - `avg_min_ttc`
+  - `avg_workload`
+
+## Plotting
+
+Generate default result plots:
+
+```powershell
+cd Simulator
+py analysis\plot_results.py --mode-summary results\mode_summary.csv --scene-mode-summary results\scene_mode_summary.csv --figures-dir analysis\figures
+```
+
+Current default plots use:
+
+- `success_rate`
+- `avg_workload`
+- `avg_min_ttc`
+
+If `matplotlib` is missing, the script prints a clear message instead of failing silently.
+
+## Current Shared-Control Design
+
+The current `M3` controller is based on:
+
+- Safety distance
+- TTC
+- Corridor complexity
+- User command instability
+- Steering conflict between user and assist
+
+These are combined into risk terms and mapped to `alpha(t)` by a smooth sigmoid-style mapping.
+
+Explainability fields are written to logs, including:
+
+- `alpha`
+- `dominant_risk`
+- `total_risk`
+- `front_min`
+- `d_min`
+- `ttc`
+
+## Repository Notes
+
+- The project currently focuses on static scenes.
+- The batch framework uses a scripted user plus noise model for repeatable comparisons.
+- `analysis/stats_tests.py` is still a placeholder and has not been fully implemented.
+- Several local `results_*` folders may exist during development; they are not required for normal use.
+
+## Quick Workflow
+
+1. Run one scene interactively to verify behavior.
+2. Run batch experiments with `runner/run_batch.py`.
+3. Build summary tables with `analysis/build_metrics.py`.
+4. Generate figures with `analysis/plot_results.py`.
+5. Use the CSV outputs for reports or further statistics.
